@@ -1,9 +1,9 @@
 import re
-import subprocess
-import platform
 from datetime import datetime, timedelta
 from models import ChatMessage, NetworkLog, Alert, LogSummary, NetworkMetric, db
 from collections import Counter
+import requests
+from urllib.parse import urlparse
 
 
 class ChatOps:
@@ -297,46 +297,97 @@ class ChatOps:
         return f"✅ Alert {alert_id} acknowledged: {alert.title}"
     
     def _cmd_ping(self, args):
-        """Ping a host"""
+        """Check if a host/URL is reachable via HTTP"""
         if not args:
-            return "❌ Usage: ping <host>"
+            return "❌ Usage: ping <host or url>"
         
         host = args[0]
         
+        # Add http:// if no scheme provided
+        if not host.startswith(('http://', 'https://')):
+            # Try https first, then http
+            urls_to_try = [f'https://{host}', f'http://{host}']
+        else:
+            urls_to_try = [host]
+        
         try:
-            # Platform-specific ping command
-            param = '-n' if platform.system().lower() == 'windows' else '-c'
-            command = ['ping', param, '4', host]
+            for url in urls_to_try:
+                try:
+                    start_time = datetime.utcnow()
+                    response = requests.get(url, timeout=5, allow_redirects=True)
+                    elapsed = (datetime.utcnow() - start_time).total_seconds() * 1000
+                    
+                    status_icon = "✅" if response.status_code < 400 else "⚠️"
+                    
+                    result = f"{status_icon} **Host Reachability Check: {host}**\n\n"
+                    result += f"URL: {url}\n"
+                    result += f"Status Code: {response.status_code}\n"
+                    result += f"Response Time: {elapsed:.0f}ms\n"
+                    result += f"Server: {response.headers.get('Server', 'Unknown')}\n"
+                    
+                    if response.status_code < 400:
+                        result += f"\n✅ Host is reachable"
+                    else:
+                        result += f"\n⚠️ Host responded with error status"
+                    
+                    return result
+                except requests.exceptions.SSLError:
+                    # If HTTPS fails due to SSL, try HTTP
+                    if url.startswith('https://') and len(urls_to_try) > 1:
+                        continue
+                    return f"❌ SSL/TLS error connecting to {host}"
+                except requests.exceptions.ConnectionError:
+                    if url == urls_to_try[-1]:  # Last attempt
+                        return f"❌ Connection failed: {host} is not reachable"
+                    continue
             
-            result = subprocess.run(command, capture_output=True, text=True, timeout=5)
+            return f"❌ Could not reach {host}"
             
-            if result.returncode == 0:
-                return f"✅ Ping to {host} successful\n```\n{result.stdout[:500]}\n```"
-            else:
-                return f"❌ Ping to {host} failed"
-        except subprocess.TimeoutExpired:
-            return f"⏱️ Ping to {host} timed out"
+        except requests.exceptions.Timeout:
+            return f"⏱️ Request to {host} timed out (>5s)"
         except Exception as e:
-            return f"❌ Error: {str(e)}"
+            return f"❌ Error checking {host}: {str(e)}"
     
     def _cmd_traceroute(self, args):
-        """Traceroute to a host"""
+        """DNS and connection info for a host"""
         if not args:
             return "❌ Usage: traceroute <host>"
         
         host = args[0]
         
-        return f"ℹ️ Traceroute to {host} would be executed here (disabled for security)"
+        return f"ℹ️ Network path tracing is not available in cloud environments.\nUse 'ping {host}' to check basic reachability."
     
     def _cmd_check(self, args):
-        """Check service status"""
+        """Check HTTP service/endpoint status"""
         if not args:
-            return "❌ Usage: check <service_name>"
+            return "❌ Usage: check <url>"
         
-        service = args[0]
+        url = args[0]
         
-        # Simulated service check
-        return f"ℹ️ Service check for '{service}' would be executed here"
+        # Add http:// if no scheme
+        if not url.startswith(('http://', 'https://')):
+            url = f'https://{url}'
+        
+        try:
+            start_time = datetime.utcnow()
+            response = requests.head(url, timeout=5, allow_redirects=True)
+            elapsed = (datetime.utcnow() - start_time).total_seconds() * 1000
+            
+            status = "✅ UP" if response.status_code < 500 else "❌ DOWN"
+            
+            result = f"🔍 **Service Check: {url}**\n\n"
+            result += f"Status: {status}\n"
+            result += f"HTTP Status: {response.status_code}\n"
+            result += f"Response Time: {elapsed:.0f}ms\n"
+            
+            return result
+            
+        except requests.exceptions.Timeout:
+            return f"⏱️ Service check timed out: {url}"
+        except requests.exceptions.ConnectionError:
+            return f"❌ Service unreachable: {url}"
+        except Exception as e:
+            return f"❌ Error checking service: {str(e)}"
     
     def _cmd_summarize(self, args):
         """Get log summary"""
@@ -412,9 +463,8 @@ class ChatOps:
         response += "  • `acknowledge <id>` - Acknowledge alert\n\n"
         
         response += "**Diagnostics**:\n"
-        response += "  • `ping <host>` - Ping a host\n"
-        response += "  • `traceroute <host>` - Trace route\n"
-        response += "  • `check <service>` - Check service\n\n"
+        response += "  • `ping <host>` - Check host reachability (HTTP)\n"
+        response += "  • `check <url>` - Check service/endpoint status\n\n"
         
         response += "**Reports**:\n"
         response += "  • `summarize [hours]` - Log summary\n"
